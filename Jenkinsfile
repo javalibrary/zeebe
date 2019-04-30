@@ -124,9 +124,13 @@ pipeline {
 
     post {
         always {
-            // Retrigger the build if there were connection issues
             script {
+                // Retrigger the build if there were connection issues
                 if (connectionProblem()) {
+                    build job: currentBuild.projectName, propagate: false, quietPeriod: 60, wait: false
+                }
+                // Retrigger the build if not the surefire problem happend
+                else if (!surefireProblem()) {
                     build job: currentBuild.projectName, propagate: false, quietPeriod: 60, wait: false
                 }
             }
@@ -136,4 +140,8 @@ pipeline {
 
 boolean connectionProblem() {
   return currentBuild.rawBuild.getLog(500).join('') ==~ /.*(ChannelClosedException|KubernetesClientException|ClosedChannelException|Connection reset).*/
+}
+
+boolean surefireProblem() {
+  return currentBuild.rawBuild.getLog(500).join('') ==~ /.*(ClassNotFoundException|NullPointerException).*/
 }
