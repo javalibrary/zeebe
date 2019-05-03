@@ -810,6 +810,7 @@
                   <dep>io.zeebe:zeebe-build-tools</dep>
                   <!-- see prepare-offline profile -->
                   <dep>org.apache.maven.surefire:surefire-junit4</dep>
+                  <dep>org.apache.maven.surefire:surefire-junit47</dep>
                 </ignoredUnusedDeclaredDependencies>
               </configuration>
             </execution>
@@ -980,6 +981,11 @@
         <dependency>
           <groupId>org.apache.maven.surefire</groupId>
           <artifactId>surefire-junit4</artifactId>
+          <version>${plugin.version.surefire}</version>
+        </dependency>
+        <dependency>
+          <groupId>org.apache.maven.surefire</groupId>
+          <artifactId>surefire-junit47</artifactId>
           <version>${plugin.version.surefire}</version>
         </dependency>
       </dependencies>
