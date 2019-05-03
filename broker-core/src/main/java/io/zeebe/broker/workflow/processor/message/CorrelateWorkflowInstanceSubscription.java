@@ -105,7 +105,7 @@ public final class CorrelateWorkflowInstanceSubscription
     final WorkflowInstanceSubscription subscription =
         subscriptionState.getSubscription(elementInstanceKey, subscriptionRecord.getMessageName());
 
-    sideEffect.accept(this::sendAcknowledgeCommand);
+    sideEffect.accept(this::sendAcknowledgeCommand); // TODO: here
     if (subscription == null || subscription.isClosing()) {
       RejectionType type = RejectionType.NOT_FOUND;
       String reason = NO_SUBSCRIPTION_FOUND_MESSAGE;

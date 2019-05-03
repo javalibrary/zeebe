@@ -23,8 +23,10 @@ import static io.zeebe.util.buffer.BufferUtil.wrapString;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -34,19 +36,28 @@ import io.zeebe.broker.logstreams.processor.TypedRecord;
 import io.zeebe.broker.logstreams.state.ZeebeState;
 import io.zeebe.broker.subscription.command.SubscriptionCommandSender;
 import io.zeebe.broker.subscription.message.data.MessageSubscriptionRecord;
+import io.zeebe.broker.subscription.message.data.WorkflowInstanceSubscriptionRecord;
 import io.zeebe.broker.subscription.message.processor.MessageEventProcessors;
 import io.zeebe.broker.subscription.message.processor.MessageObserver;
 import io.zeebe.broker.util.StreamProcessorControl;
 import io.zeebe.broker.util.StreamProcessorRule;
+import io.zeebe.broker.workflow.processor.WorkflowEventProcessors;
+import io.zeebe.broker.workflow.processor.timer.DueDateTimerChecker;
+import io.zeebe.broker.workflow.state.WorkflowInstanceSubscription;
 import io.zeebe.protocol.clientapi.RejectionType;
 import io.zeebe.protocol.impl.record.value.message.MessageRecord;
+import io.zeebe.protocol.impl.record.value.workflowinstance.WorkflowInstanceRecord;
 import io.zeebe.protocol.intent.MessageIntent;
 import io.zeebe.protocol.intent.MessageSubscriptionIntent;
+import io.zeebe.protocol.intent.WorkflowInstanceSubscriptionIntent;
+import io.zeebe.util.buffer.BufferUtil;
+import java.util.Collections;
 import org.agrona.DirectBuffer;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -56,8 +67,10 @@ public class MessageStreamProcessorTest {
 
   @Mock private SubscriptionCommandSender mockSubscriptionCommandSender;
   @Mock private TopologyManager mockTopologyManager;
+  @Mock private DueDateTimerChecker mockDueDateTimerChecker;
 
   private StreamProcessorControl streamProcessor;
+  private ZeebeState zeebeState;
 
   @Before
   public void setup() {
@@ -75,15 +88,27 @@ public class MessageStreamProcessorTest {
             anyLong(), anyLong(), any(DirectBuffer.class)))
         .thenReturn(true);
 
+    when(mockSubscriptionCommandSender.correlateMessageSubscription(
+            anyInt(), anyLong(), anyLong(), any(DirectBuffer.class)))
+        .thenReturn(true);
+
     streamProcessor =
         rule.runStreamProcessor(
             (typedEventStreamProcessorBuilder, zeebeDb, dbContext) -> {
-              final ZeebeState zeebeState = new ZeebeState(zeebeDb, dbContext);
+              zeebeState = new ZeebeState(zeebeDb, dbContext);
               MessageEventProcessors.addMessageProcessors(
                   typedEventStreamProcessorBuilder,
                   zeebeState,
                   mockSubscriptionCommandSender,
                   mockTopologyManager);
+
+              WorkflowEventProcessors.addWorkflowProcessors(
+                  typedEventStreamProcessorBuilder,
+                  zeebeState,
+                  mockSubscriptionCommandSender,
+                  mockTopologyManager,
+                  mockDueDateTimerChecker,
+                  1);
               return typedEventStreamProcessorBuilder.build();
             });
   }
@@ -340,6 +365,54 @@ public class MessageStreamProcessorTest {
     assertAllMessagesReceived(subscription, first, second);
   }
 
+  @Test
+  public void shouldCorrelate() {
+    // given
+    final DirectBuffer handlerNodeId = wrapString("handler");
+
+    final WorkflowInstanceSubscriptionRecord workflowInstanceSubscription =
+        workflowInstanceSubscription();
+    final WorkflowInstanceSubscription subscription =
+        new WorkflowInstanceSubscription(
+            workflowInstanceSubscription.getWorkflowInstanceKey(),
+            workflowInstanceSubscription.getElementInstanceKey(),
+            handlerNodeId,
+            workflowInstanceSubscription.getMessageName(),
+            BufferUtil.wrapString("key"),
+            1000,
+            true);
+
+    zeebeState.getWorkflowInstanceSubscriptionState().put(subscription);
+    zeebeState
+        .getWorkflowState()
+        .getEventScopeInstanceState()
+        .createInstance(
+            workflowInstanceSubscription.getElementInstanceKey(),
+          Collections.singletonList(handlerNodeId));
+
+    WorkflowInstanceRecord record = new WorkflowInstanceRecord();
+    // TODO: put record in element instance state
+    zeebeState.getWorkflowState().getElementInstanceState().newInstance(workflowInstanceSubscription.getElementInstanceKey(), );
+    streamProcessor.blockAfterWorkflowInstanceSubscriptionEvent(
+        m ->
+            m.getMetadata().getRejectionType() == RejectionType.NOT_FOUND
+                || m.getMetadata().getRejectionType() == RejectionType.INVALID_STATE);
+
+    // when
+    rule.writeCommand(WorkflowInstanceSubscriptionIntent.CORRELATE, workflowInstanceSubscription);
+    rule.writeCommand(WorkflowInstanceSubscriptionIntent.CORRELATE, workflowInstanceSubscription);
+
+    waitUntil(() -> streamProcessor.isBlocked());
+    streamProcessor.unblock();
+
+    // then
+    final InOrder order = inOrder(mockSubscriptionCommandSender);
+    order
+        .verify(mockSubscriptionCommandSender, timeout(5_000).times(1))
+        .correlateMessageSubscription(eq(1), eq(1L), eq(1L), eq(BufferUtil.wrapString("msg")));
+    order.verifyNoMoreInteractions();
+  }
+
   private void assertAllMessagesReceived(
       MessageSubscriptionRecord subscription, MessageRecord first, MessageRecord second) {
     final ArgumentCaptor<DirectBuffer> nameCaptor = ArgumentCaptor.forClass(DirectBuffer.class);
@@ -354,6 +427,20 @@ public class MessageStreamProcessorTest {
     assertThat(nameCaptor.getValue()).isEqualTo(subscription.getMessageName());
     assertThat(variablesCaptor.getAllValues().get(0)).isEqualTo(first.getVariables());
     assertThat(variablesCaptor.getAllValues().get(1)).isEqualTo(second.getVariables());
+  }
+
+  private WorkflowInstanceSubscriptionRecord workflowInstanceSubscription() {
+    final WorkflowInstanceSubscriptionRecord subscription =
+        new WorkflowInstanceSubscriptionRecord();
+    subscription
+        .setWorkflowInstanceKey(1L)
+        .setElementInstanceKey(1L)
+        .setMessageName(BufferUtil.wrapString("msg"))
+        .setSubscriptionPartitionId(1)
+        .setVariables(asMsgPack("key", "123"))
+        .setCloseOnCorrelate(true);
+
+    return subscription;
   }
 
   private MessageSubscriptionRecord messageSubscription() {
